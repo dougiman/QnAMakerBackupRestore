@@ -1,5 +1,5 @@
 ﻿// This is a prototype tool that allows for extraction of data from an Azure Search index
-// and restore it in a target index. Once done you can attach it to the QnAMaker runtime
+// to TSV. Once done you can attach it to the QnAMaker runtime
 // Since this tool is still under development, it should not be used for production usage
 
 using Microsoft.Azure.Search;
@@ -21,25 +21,17 @@ namespace AzureSearchBackupRestore
     {
         private static string SourceSearchServiceName = "<Source Azure search service name>";
         private static string SourceAPIKey = "<Source Azure search admin key>";
-        private static string TargetSearchServiceName = "<Target Azure search service name>";
-        private static string TargetAPIKey = "<Source Azure search admin key>";
-
 
         private static SearchServiceClient SourceSearchClient;
         private static ISearchIndexClient SourceIndexClient;
-        private static SearchServiceClient TargetSearchClient;
-        private static ISearchIndexClient TargetIndexClient;
 
-        private static int MaxBatchSize = 500;          // JSON files will contain this many documents / file and can be up to 1000
+        private static int MaxBatchSize = 500;          // Files will contain this many documents / file and can be up to 1000
         private static int ParallelizedJobs = 10;       // Output content in parallel jobs
 
         static void Main(string[] args)
         {
             // Get all the indexes from source
             Indexes indexList = GetIndexes();
-
-            // Re-Creating the synonym map
-            ReCreateSynonymMap();
 
             // For each index in source do the following
             foreach (Index sourceIndex in indexList.value)
@@ -48,98 +40,14 @@ namespace AzureSearchBackupRestore
 
                 SourceSearchClient = new SearchServiceClient(SourceSearchServiceName, new SearchCredentials(SourceAPIKey));
                 SourceIndexClient = SourceSearchClient.Indexes.GetClient(nameOfIndex);
-                TargetSearchClient = new SearchServiceClient(TargetSearchServiceName, new SearchCredentials(TargetAPIKey));
-                TargetIndexClient = TargetSearchClient.Indexes.GetClient(nameOfIndex);
 
-                // Extract the index schema and write to file
-                Console.WriteLine("Writing Index Schema to {0}\r\n", nameOfIndex + ".schema");
-                File.WriteAllText(nameOfIndex + ".schema", GetIndexSchema(nameOfIndex));
-
-                // Extract the content to JSON files 
+                // Extract the content to TSV files 
                 int SourceDocCount = GetCurrentDocCount(SourceIndexClient);
-                LaunchParallelDataExtraction(SourceDocCount, nameOfIndex);     // Output content from index to json files
-
-                // Re-create and import content to target index
-                DeleteIndex(nameOfIndex);
-                CreateTargetIndex(nameOfIndex);
-                ImportFromJSON(nameOfIndex);
-                Console.WriteLine("\r\nWaiting 10 seconds for target to index content...");
-                Console.WriteLine("NOTE: For really large indexes it may take longer to index all content.\r\n");
-                Thread.Sleep(10000);
-
-                // Validate all content is in target index
-                int TargetDocCount = GetCurrentDocCount(TargetIndexClient);
-                Console.WriteLine("Source Index {0} contains {1} docs", nameOfIndex, SourceDocCount);
-                Console.WriteLine("Target Index {0} contains {1} docs\r\n", nameOfIndex, TargetDocCount);
-
+                LaunchParallelDataExtraction(SourceDocCount, nameOfIndex);     // Output content from index to TSV files
             }
 
             Console.WriteLine("Press any key to continue...");
             Console.ReadLine();
-        }
-
-        static void ReCreateSynonymMap()
-        {
-            // Get the Synonym map from the source
-            Uri sourceServiceUri = new Uri("https://" + SourceSearchServiceName + ".search.windows.net");
-            HttpClient HttpClient = new HttpClient();
-            HttpClient.DefaultRequestHeaders.Add("api-key", SourceAPIKey);
-
-            string synonymMapName = "synonym-map";
-            string synonymBody = "";
-
-            try
-            {
-                // QnAMaker uses the synonymmap of synonym-map
-                Uri uri = new Uri(sourceServiceUri, "/synonymmaps/"+ synonymMapName + "/");
-                HttpResponseMessage response = AzureSearchHelper.SendSearchRequest(HttpClient, HttpMethod.Get, uri);
-                AzureSearchHelper.EnsureSuccessfulSearchResponse(response);
-                synonymBody = response.Content.ReadAsStringAsync().Result.ToString();
-
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Error: {0}", ex.Message.ToString());
-            }
-
-            // Delete the source synonymmap if it exists
-            Uri targetServiceUri = new Uri("https://" + TargetSearchServiceName + ".search.windows.net");
-            HttpClient.DefaultRequestHeaders.Remove("api-key");
-            HttpClient.DefaultRequestHeaders.Add("api-key", TargetAPIKey);
-
-            try
-            {
-                // QnAMaker uses the synonymmap of synonym-map
-                Uri uri = new Uri(targetServiceUri, "/synonymmaps/" + synonymMapName + "/");
-                HttpResponseMessage response = AzureSearchHelper.SendSearchRequest(HttpClient, HttpMethod.Delete, uri);
-                AzureSearchHelper.EnsureSuccessfulSearchResponse(response);
-                string resp = response.Content.ReadAsStringAsync().Result.ToString();
-
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Error: {0}", ex.Message.ToString());
-            }
-
-            // Create the new synonym in the target if it exists
-            if (!string.IsNullOrEmpty(synonymBody))
-            {
-                synonymBody = "{" + synonymBody.Substring(synonymBody.IndexOf("\"name\""));
-                try
-                {
-                    // QnAMaker uses the synonymmap of synonym-map
-                    Uri uri = new Uri(targetServiceUri, "/synonymmaps/" + synonymMapName + "/");
-                    HttpResponseMessage response = AzureSearchHelper.SendSearchRequest(HttpClient, HttpMethod.Put, uri, synonymBody);
-                    AzureSearchHelper.EnsureSuccessfulSearchResponse(response);
-                    synonymBody = response.Content.ReadAsStringAsync().Result.ToString();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine("Error: {0}", ex.Message.ToString());
-                }
-            }
-
-            Console.WriteLine("Synonym Map created in Target");
         }
 
         static void LaunchParallelDataExtraction(int CurrentDocCount, string nameOfIndex)
@@ -157,10 +65,10 @@ namespace AzureSearchBackupRestore
                     int fileCounter = FileCounter;
                     if ((fileCounter - 1) * MaxBatchSize < CurrentDocCount)
                     {
-                        Console.WriteLine("Writing {0} docs to {1}", MaxBatchSize, nameOfIndex + fileCounter + ".json");
+                        Console.WriteLine("Writing {0} docs to {1}", MaxBatchSize, nameOfIndex + fileCounter + ".tsv");
 
                         tasks.Add(Task.Factory.StartNew(() =>
-                            ExportToJSON((fileCounter - 1) * MaxBatchSize, IDFieldName, nameOfIndex + fileCounter + ".json")
+                            ExportToTSV((fileCounter - 1) * MaxBatchSize, IDFieldName, nameOfIndex + fileCounter + ".tsv")
                         ));
                     }
 
@@ -171,10 +79,10 @@ namespace AzureSearchBackupRestore
             return;
         }
 
-        static void ExportToJSON(int Skip, string IDFieldName, string FileName)
+        static void ExportToTSV(int Skip, string IDFieldName, string FileName)
         {
-            // Extract all the documents from the selected index to JSON files in batches of 500 docs / file
-            string json = string.Empty;
+            // Extract all the documents from the selected index to TSV files in batches of 500 docs / file
+            string tsv = string.Empty;
             try
             {
                 SearchParameters sp = new SearchParameters()
@@ -185,62 +93,68 @@ namespace AzureSearchBackupRestore
                 };
                 DocumentSearchResult response = SourceIndexClient.Documents.Search("*", sp);
 
+                // Add the header.
+                tsv += "Question\t";
+                tsv += "Answer\t";
+                tsv += "Source\t";
+                tsv += "Metadata\r\n";
+
                 foreach (var doc in response.Results)
                 {
-                    json += JsonConvert.SerializeObject(doc.Document) + ",";
-                    // Geospatial is formatted such that it needs to be changed for reupload
-                    // Unfortunately since it comes down in Lat, Lon format, I need to alter it to Lon, Lat for upload
+                    string metadataString = string.Empty;
 
-                    while (json.IndexOf("CoordinateSystem") > -1)
+                    // Get the questions, answer, and source from this document.
+                    // Note there is a 1:many relationship between an answer and questions.
+                    doc.Document.TryGetValue("questions", out var questions);
+                    doc.Document.TryGetValue("answer", out var answer);
+                    doc.Document.TryGetValue("source", out var source);
+
+                    // We need to reformat the metadata given how it is stored in Azure Search
+                    // Create a list of all metadata elements in this doc.
+                    var metadataList =
+                        from keyValuePair in doc.Document
+                        where keyValuePair.Key.StartsWith("metadata_")
+                        select keyValuePair;
+
+                    // Form a string with all of the valid metadata elements in this doc.
+                    for (int i = 0; i < metadataList.Count(); i++)
                     {
-                        // At this point the data looks like this
-                        // {"Latitude":38.3399,"Longitude":-86.0887,"IsEmpty":false,"Z":null,"M":null,"CoordinateSystem":{"EpsgId":4326,"Id":"4326","Name":"WGS84"}}
-                        int LatStartLocation = json.IndexOf("\"Latitude\":");
-                        LatStartLocation = json.IndexOf(":", LatStartLocation) + 1;
-                        int LatEndLocation = json.IndexOf(",", LatStartLocation);
-                        int LonStartLocation = json.IndexOf("\"Longitude\":");
-                        LonStartLocation = json.IndexOf(":", LonStartLocation)+1;
-                        int LonEndLocation = json.IndexOf(",", LonStartLocation);
-                        string Lat = json.Substring(LatStartLocation, LatEndLocation - LatStartLocation);
-                        string Lon = json.Substring(LonStartLocation, LonEndLocation - LonStartLocation);
+                        string key = metadataList.ElementAt(i).Key.Replace("metadata_", "");
+                        string value = (string) metadataList.ElementAt(i).Value;
 
-                        // Now it needs to look like this
-                        // { "type": "Point", "coordinates": [-122.131577, 47.678581] }
-                        int GeoStartPosition = json.IndexOf("\"Latitude\":") - 1;
-                        int GeoEndPosition = json.IndexOf("}}", GeoStartPosition) + 2;
-                        string updatedJson = json.Substring(0, GeoStartPosition) + "{ \"type\": \"Point\", \"coordinates\": [";
-                        updatedJson += Lon + ", " + Lat + "] }";
-                        updatedJson += json.Substring(GeoEndPosition);
-                        json = updatedJson;
+                        if (!string.IsNullOrEmpty(key) &&
+                            !string.IsNullOrEmpty(value))
+                        {
+                            // If there is existing metadata, add a delimiter.
+                            if (!string.IsNullOrEmpty(metadataString))
+                            {
+                                metadataString += "|";
+                            }
+
+                            metadataString += key + ":" + value;
+                        }
                     }
 
-                    json = json.Replace("\"Latitude\":", "\"type\": \"Point\", \"coordinates\": [");
-                    json = json.Replace("\"Longitude\":", "");
-                    json = json.Replace(",\"IsEmpty\":false,\"Z\":null,\"M\":null,\"CoordinateSystem\":{\"EpsgId\":4326,\"Id\":\"4326\",\"Name\":\"WGS84\"}", "]");
-                    json += "\r\n";
-
-                    //{ "type": "Point", "coordinates": [-122.131577, 47.678581] }
-                    //{"Latitude":41.113,"Longitude":-95.6269}
-                    //json += "\r\n";
-
+                    // Add the various elements to the TSV.
+                    // Because of the 1:many question relationship, we will duplicate results in the TSV.
+                    foreach (var question in (string[]) questions)
+                    {                          
+                        tsv += question + "\t";
+                        tsv += answer + "\t";
+                        tsv += source + "\t";
+                        tsv += metadataString;
+                        tsv += "\r\n";
+                    }
                 }
-
-                // Output the formatted content to a file
-                json = json.Substring(0, json.Length - 3); // remove trailing comma
-                File.WriteAllText(FileName, "{\"value\": [");
-                File.AppendAllText(FileName, json);
-                File.AppendAllText(FileName, "]}");
+                File.AppendAllText(FileName, tsv);
                 Console.WriteLine("Total documents written: {0}", response.Results.Count.ToString());
-                json = string.Empty;
-
-
             }
             catch (Exception ex)
             {
                 Console.WriteLine("Error: {0}", ex.Message.ToString());
             }
             return;
-        }
+        }  
 
         static string GetIDFieldName(string nameOfIndex)
         {
@@ -290,81 +204,6 @@ namespace AzureSearchBackupRestore
             return JsonConvert.DeserializeObject<Indexes>(indexResponse);
         }
 
-        static string GetIndexSchema(string nameOfIndex)
-        {
-            // Extract the schema for this index
-            // I like using REST here since I can just take the response as-is
-
-            Uri ServiceUri = new Uri("https://" + SourceSearchServiceName + ".search.windows.net");
-            HttpClient HttpClient = new HttpClient();
-            HttpClient.DefaultRequestHeaders.Add("api-key", SourceAPIKey);
-
-            string Schema = string.Empty;
-            try
-            {
-                Uri uri = new Uri(ServiceUri, "/indexes/" + nameOfIndex);
-                HttpResponseMessage response = AzureSearchHelper.SendSearchRequest(HttpClient, HttpMethod.Get, uri);
-                AzureSearchHelper.EnsureSuccessfulSearchResponse(response);
-                Schema = response.Content.ReadAsStringAsync().Result.ToString();
-
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Error: {0}", ex.Message.ToString());
-            }
-
-            return Schema;
-        }
-
-        private static bool DeleteIndex(string nameOfIndex)
-        {
-            // Delete the index if it exists
-            try
-            {
-                TargetSearchClient.Indexes.Delete(nameOfIndex);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Error deleting index: {0}\r\n", ex.Message);
-                Console.WriteLine("Did you remember to set your SearchServiceName and SearchServiceApiKey?\r\n");
-                return false;
-            }
-
-            return true;
-        }
-
-        static void CreateTargetIndex(string nameOfIndex)
-        {
-            // Use the schema file to create a copy of this index
-            // I like using REST here since I can just take the response as-is
-
-            string json = File.ReadAllText(nameOfIndex + ".schema");
-
-            // Do some cleaning of this file to change index name, etc
-            json = "{" + json.Substring(json.IndexOf("\"name\""));
-            int indexOfIndexName = json.IndexOf("\"",json.IndexOf("name\"")+5) + 1;
-            int indexOfEndOfIndexName = json.IndexOf("\"",indexOfIndexName);
-            json = json.Substring(0, indexOfIndexName) + nameOfIndex + json.Substring(indexOfEndOfIndexName);
-
-            Uri ServiceUri = new Uri("https://" + TargetSearchServiceName + ".search.windows.net");
-            HttpClient HttpClient = new HttpClient();
-            HttpClient.DefaultRequestHeaders.Add("api-key", TargetAPIKey);
-
-            try
-            {
-                Uri uri = new Uri(ServiceUri, "/indexes");
-                HttpResponseMessage response = AzureSearchHelper.SendSearchRequest(HttpClient, HttpMethod.Post, uri, json);
-                response.EnsureSuccessStatusCode();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Error: {0}", ex.Message.ToString());
-            }
-
-        }
-
-
-
         static int GetCurrentDocCount(ISearchIndexClient IndexClient)
         {
             // Get the current doc count of the specified index
@@ -387,30 +226,6 @@ namespace AzureSearchBackupRestore
 
             return -1;
 
-        }
-
-        static void ImportFromJSON(string nameOfIndex)
-        {
-            // Take JSON file and import this as-is to target index
-            Uri ServiceUri = new Uri("https://" + TargetSearchServiceName + ".search.windows.net");
-            HttpClient HttpClient = new HttpClient();
-            HttpClient.DefaultRequestHeaders.Add("api-key", TargetAPIKey);
-
-            try
-            {
-                foreach (string fileName in Directory.GetFiles(Directory.GetCurrentDirectory(), nameOfIndex + "*.json"))
-                {
-                    Console.WriteLine("Uploading documents from file {0}", fileName);
-                    string json = File.ReadAllText(fileName);
-                    Uri uri = new Uri(ServiceUri, "/indexes/"+ nameOfIndex + "/docs/index");
-                    HttpResponseMessage response = AzureSearchHelper.SendSearchRequest(HttpClient, HttpMethod.Post, uri, json);
-                    response.EnsureSuccessStatusCode();
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Error: {0}", ex.Message.ToString());
-            }
         }
     }
 
